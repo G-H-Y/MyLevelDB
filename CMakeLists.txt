@@ -209,19 +209,23 @@ target_sources(leveldb
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/write_batch.h"
 )
 
-if (WIN32)
-  target_sources(leveldb
-    PRIVATE
-      "util/env_windows.cc"
-      "util/windows_logger.h"
-  )
-else (WIN32)
-  target_sources(leveldb
-    PRIVATE
-      "util/env_posix.cc"
-      "util/posix_logger.h"
-  )
-endif (WIN32)
+#if (WIN32)
+#  target_sources(leveldb
+#    PRIVATE
+#      "util/env_windows.cc"
+#      "util/windows_logger.h"
+#  )
+#else (WIN32)
+#  target_sources(leveldb
+#    PRIVATE
+#      "util/env_posix.cc"
+#      "util/posix_logger.h"
+#  )
+#endif (WIN32)
+
+target_sources(leveldb
+        PRIVATE
+        "util/env_plog.cc")
 
 # MemEnv is not part of the interface and could be pulled to a separate library.
 target_sources(leveldb
@@ -311,6 +315,10 @@ if(LEVELDB_BUILD_TESTS)
         APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
   endif(LEVELDB_HAVE_NO_MISSING_FIELD_INITIALIZERS)
 
+  set(PLOG_DIR ${CMAKE_CURRENT_LIST_DIR}/plog/)
+  #MESSAGE(${CMAKE_CURRENT_LIST_DIR})
+  include_directories(${PLOG_DIR})
+  link_directories(${PLOG_DIR}/lib)
   function(leveldb_test test_file)
     get_filename_component(test_target_name "${test_file}" NAME_WE)
 
@@ -323,7 +331,8 @@ if(LEVELDB_BUILD_TESTS)
 
         "${test_file}"
     )
-    target_link_libraries("${test_target_name}" leveldb gmock gtest benchmark)
+    target_link_libraries("${test_target_name}" leveldb gmock gtest benchmark plog_fabric rte_eal plog_fabric_init)
+
     target_compile_definitions("${test_target_name}"
       PRIVATE
         ${LEVELDB_PLATFORM_NAME}=1
@@ -374,13 +383,14 @@ if(LEVELDB_BUILD_TESTS)
     leveldb_test("util/crc32c_test.cc")
     leveldb_test("util/hash_test.cc")
     leveldb_test("util/logging_test.cc")
+    leveldb_test("util/env_plog_test.cc")
 
     # TODO(costan): This test also uses
     #               "util/env_{posix|windows}_test_helper.h"
     if (WIN32)
-      leveldb_test("util/env_windows_test.cc")
+      #leveldb_test("util/env_windows_test.cc")
     else (WIN32)
-      leveldb_test("util/env_posix_test.cc")
+      #leveldb_test("util/env_posix_test.cc")
     endif (WIN32)
   endif(NOT BUILD_SHARED_LIBS)
 endif(LEVELDB_BUILD_TESTS)

@@ -6,3 +6,7 @@
 # Build directory.
 build/
 out/
+.idea/
+cmake-build-debug/
+third_party/
+googletest/
