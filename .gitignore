@@ -10,3 +10,4 @@ out/
 cmake-build-debug/
 third_party/
 googletest/
+cmake-build-debug-futurewei/

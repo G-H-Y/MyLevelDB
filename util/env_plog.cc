@@ -96,7 +96,7 @@ static inline uint32_t plog_calc_rw_len(uint32_t data_len, uint16_t gran){
 
 class PlogRWStatusPool{
  public:
-  PlogRWStatusPool();
+  PlogRWStatusPool(){};
   ~PlogRWStatusPool(){
     for(auto it=plog_rw_status_pool_.begin(); it!=plog_rw_status_pool_.end(); it++){
       delete it->second;
@@ -179,7 +179,7 @@ class PlogFile{
         is_manifest_(isManifest(plog_id)),
         is_current_(isCurrent(plog_id)),
         refs_(0){}
-  ~PlogFile();
+  ~PlogFile(){};
 
   static bool isManifest(const std::string plog_id){
     return Slice(plog_id).starts_with("MANIFEST");

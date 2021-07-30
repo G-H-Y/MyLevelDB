@@ -331,7 +331,9 @@ if(LEVELDB_BUILD_TESTS)
 
         "${test_file}"
     )
-    target_link_libraries("${test_target_name}" leveldb gmock gtest benchmark plog_fabric rte_eal plog_fabric_init)
+    #target_link_libraries("${test_target_name}" leveldb gmock gtest benchmark plog_fabric rte_eal plog_fabric_init storage_bdev_rw) storage_bdev_rw
+    target_link_libraries("${test_target_name}" leveldb gmock gtest benchmark
+            rte_pci rte_mempool rte_net rte_kvargs ssl rte_ring rte_eal ibverbs xnetlite storage_bdev_rw rdmacm crypto rte_cmdline lwt rte_pci rte_eal dptracepoint rte_ring rte_kvargs rte_net ibverbs dswcore_mem plog_fabric iod dplog rte_bus_pci rte_mbuf dpumm_mm rte_ethdev mxml ssl rte_mbuf securec dpdiagnose patmatch rte_mempool_ring plog_fabric_init osax_util rte_mempool rte_cmdline dposax xtest os rte_ethdev dswcore_so rte_bus_pci scpart_mgr mxml rdmacm rte_mempool_ring ftdsclient )
 
     target_compile_definitions("${test_target_name}"
       PRIVATE
