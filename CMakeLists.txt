@@ -281,6 +281,11 @@ if(HAVE_TCMALLOC)
   target_link_libraries(leveldb tcmalloc)
 endif(HAVE_TCMALLOC)
 
+#link plog
+set(PLOG_DIR ${CMAKE_CURRENT_LIST_DIR}/plog/)
+include_directories(${PLOG_DIR})
+link_directories(${PLOG_DIR}/lib)
+
 # Needed by port_stdcxx.h
 find_package(Threads REQUIRED)
 target_link_libraries(leveldb Threads::Threads)
@@ -315,10 +320,6 @@ if(LEVELDB_BUILD_TESTS)
         APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
   endif(LEVELDB_HAVE_NO_MISSING_FIELD_INITIALIZERS)
 
-  set(PLOG_DIR ${CMAKE_CURRENT_LIST_DIR}/plog/)
-  #MESSAGE(${CMAKE_CURRENT_LIST_DIR})
-  include_directories(${PLOG_DIR})
-  link_directories(${PLOG_DIR}/lib)
   function(leveldb_test test_file)
     get_filename_component(test_target_name "${test_file}" NAME_WE)
 
