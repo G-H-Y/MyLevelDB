@@ -19,6 +19,7 @@ namespace leveldb {
 constexpr const size_t kWritableFileBufferSize = 65536;
 const char *esn = "HS00027AYF10K9000095";
 const char *bdf = "0000:d9:00.0";
+#define PLOG_ID_LENGTH 8
 #define COMPLETION_USLEEP_TIME 1000
 #define CTX_ISALLDONE_TIMEOUT 12
 #define PLOG_CTX_TIMEOUT_MS (12 * 1000)
@@ -30,6 +31,15 @@ const char *bdf = "0000:d9:00.0";
 #define ENTRY_PER_SGL 64
 #define RTE_ALIGN 16
 //#define SGL_CNT 1
+
+enum plog_id_cvs {
+  PLOG_LDB,
+  PLOG_MFST,
+  PLOG_LOG,
+  PLOG_LOCK,
+  PLOG_CUR,
+  PLOG_OTHER,
+};
 
 enum plog_done {
   PLOG_FABRIC_ONGOING,
@@ -45,6 +55,8 @@ enum plog_status {
 struct plog_rw_status {
   enum plog_status status;
   enum plog_done done;
+  int status_code;
+  int code_type;
 };
 
 static inline void plog_status_init(struct plog_rw_status *status){
@@ -62,6 +74,8 @@ static inline int is_plog_status_success(struct plog_rw_status *status){
 
 void plog_rw_done(int status_code, int code_type, void *cb_arg){
   struct plog_rw_status *status = (struct plog_rw_status *)cb_arg;
+  status->status_code = status_code;
+  status->code_type = code_type;
   if (status_code == 0 && code_type == 0) {
     status->status = PLOG_FABRIC_STATUS_SUCCESS;
   } else {
@@ -104,28 +118,28 @@ class PlogRWStatusPool{
     plog_rw_status_pool_.clear();
   }
 
-  struct plog_rw_status* Allocator(std::string plog_id){
+  struct plog_rw_status* Allocator(std::string filename){
     MutexLock lock(&pool_mutex_); //std::mutex.lock() blocks if the mutex is not available
     struct plog_rw_status* p_status = new plog_rw_status();
     plog_status_init(p_status);
-    plog_rw_status_pool_[plog_id] = p_status;
+    plog_rw_status_pool_[filename] = p_status;
     return p_status;
   }
 
-  Status Deallocator(std::string plog_id, struct plog_rw_status* p_status){
+  Status Deallocator(std::string filename, struct plog_rw_status* p_status){
     MutexLock lock(&pool_mutex_);
-    if(plog_rw_status_pool_.find(plog_id) == plog_rw_status_pool_.end()){
-      return Status::IOError(plog_id, "Plog Status not found");
-    }else if(plog_rw_status_pool_[plog_id]!= p_status){
-      return Status::IOError(plog_id, "Plog Status address changed");
+    if(plog_rw_status_pool_.find(filename) == plog_rw_status_pool_.end()){
+      return Status::IOError(filename, "Plog Status not found");
+    }else if(plog_rw_status_pool_[filename]!= p_status){
+      return Status::IOError(filename, "Plog Status address changed");
     }else{
       while (!is_plog_cmd_done(p_status)) {
         usleep(COMPLETION_USLEEP_TIME);
       }
       if (!is_plog_status_success(p_status)) {
-        return Status::IOError(plog_id, "plog write failed");
+        return Status::IOError(filename, "plog write failed");
       }
-      plog_rw_status_pool_.erase(plog_id);
+      plog_rw_status_pool_.erase(filename);
       delete p_status;
     }
     return Status::OK();
@@ -158,7 +172,8 @@ class PlogRWStatusPool{
 
 class PlogFile{
  public:
-  const std::string plog_id_;
+  const std::string filename_;
+  const uint64_t plog_id_;
   bool flag_;
   bool is_current_;
   bool is_manifest_;
@@ -168,35 +183,83 @@ class PlogFile{
   static int plog_disk_fd_;
   static port::Mutex files_mutex_;
   static std::map<std::string,PlogFile*> files_ GUARDED_BY(files_mutex_);
-  //static port::Mutex writefile_mutex_;
-  //static std::map<std::string,PlogFile*> writefile_ GUARDED_BY(writefile_mutex_);
 
-  PlogFile(const std::string plog_id)
-      : plog_id_(plog_id),
+  PlogFile(const std::string filename)
+      : filename_(filename),
+        plog_id_(NametoID(filename)),
         p_status_(nullptr),
         flag_(true),
         do_delete_(false),
-        is_manifest_(isManifest(plog_id)),
-        is_current_(isCurrent(plog_id)),
+        is_manifest_(isManifest(filename)),
+        is_current_(isCurrent(filename)),
         refs_(0){}
   ~PlogFile(){};
 
-  static bool isManifest(const std::string plog_id){
-    return Slice(plog_id).starts_with("MANIFEST");
+  static bool isManifest(const std::string filename){
+    return Slice(filename).starts_with("MANIFEST");
   }
 
-  static bool isCurrent(const std::string plog_id){
-    return Slice(plog_id).starts_with("CURRENT");
+  static bool isCurrent(const std::string filename){
+    return Slice(filename).starts_with("CURRENT");
   }
 
-  static uint64_t GetSize(std::string plog_id){
+  static bool isLOG(const std::string filename){
+    return Slice(filename).starts_with("LOG");
+  }
+
+  static bool isLOCK(const std::string filename){
+    return Slice(filename).starts_with("LOCK");
+  }
+
+  static bool isLDB(const std::string filename){
+    std::size_t found = filename.find('.');
+    if(found != std::string::npos){
+      std::string substr = filename.substr(found,filename.length());
+      return Slice(substr).starts_with(".ldb");
+    }
+    return false;
+  }
+
+  static uint64_t NametoID(std::string filename){
+    uint64_t plog_id;
+    int found = filename.find('.');
+    int filename_end;
+    std::string filename_cut;
+    if(found != std::string::npos){
+      filename_end = found > PLOG_ID_LENGTH ? PLOG_ID_LENGTH-1 : found;
+    }else{
+      filename_end = filename.size() > PLOG_ID_LENGTH ? PLOG_ID_LENGTH-1 :filename.size();
+    }
+
+    if(isLDB(filename)){
+      filename_cut = filename.substr(0,filename_end) + std::to_string(PLOG_LDB);
+    }else if(isCurrent(filename)){
+      filename_cut = filename + std::to_string(PLOG_CUR);
+    }else if(isManifest(filename)){
+      filename_cut = filename + std::to_string(PLOG_MFST);
+    }else if(isLOG(filename)){
+      filename_cut = filename + std::to_string(PLOG_LOG);
+    }else if(isLOCK(filename)){
+      filename_cut = filename + std::to_string(PLOG_LOCK);
+    }else{
+      filename_cut = filename.substr(0,filename_end) + std::to_string(PLOG_OTHER);
+    }
+    char* pend;
+    plog_id = std::strtoull(filename_cut.data(), &pend, 0);
+    if(pend == filename_cut.data()){
+      plog_id = *(uint64_t*) filename_cut.data();
+    }
+    return plog_id;
+  }
+
+  static uint64_t GetSize(std::string filename, uint64_t plog_id){
     struct plog_rw_status plog_status;
     struct plog_io_ctx ctx = {0};
     struct plog_attr_table attr = {0};
     struct plog_param plog_param = {0};
     init_plog_io_ctx(&ctx, plog_rw_done, &plog_status);
     plog_status_init(&plog_status);
-    plog_param.plog_id = std::strtoll(plog_id.data(), nullptr,0);
+    plog_param.plog_id = plog_id;
     memset(&attr, 0x0, sizeof(attr));
     plog_get_attr(plog_disk_fd_,&plog_param,&attr,&ctx);
     while (!is_plog_cmd_done(&plog_status)) {
@@ -209,9 +272,9 @@ class PlogFile{
     return attr.written_size;
   }
 
-  static Status DoCreate(std::string plog_id){
+  static Status DoCreate(std::string filename, uint64_t plog_id){
     if(plog_disk_fd_ < 1){
-      return Status::IOError(plog_id,"plog_disk_fd_ < 1");
+      return Status::IOError(filename,"plog_disk_fd_ < 1");
     }
     struct plog_rw_status plog_status;
     struct plog_io_ctx ctx = {0};
@@ -219,7 +282,7 @@ class PlogFile{
     struct plog_param plog_param = {0};
     init_plog_io_ctx(&ctx, plog_rw_done, &plog_status);
     plog_status_init(&plog_status);
-    plog_param.plog_id = std::strtoll(plog_id.data(), nullptr,0);
+    plog_param.plog_id = plog_id;
     memset(&attr, 0x0, sizeof(attr));
     attr.create_size = PLOG_CREATE_SIZE;
     plog_create(plog_disk_fd_,&plog_param,&attr,&ctx);
@@ -228,29 +291,27 @@ class PlogFile{
       usleep(COMPLETION_USLEEP_TIME);
     }
     if (!is_plog_status_success(&plog_status)) {
-      //flag_ = false;
-      return Status::IOError(plog_id,"Create Failed");
+      return Status::IOError(filename,"Create Failed");
     }
-    //flag_ = true;
     return Status::OK();
   }
 
-  static Status DoAppend(std::string plog_id, sgl_vector_t *sgl_vector,
+  static Status DoAppend(std::string filename, uint64_t plog_id, sgl_vector_t *sgl_vector,
                          struct plog_rw_status* plog_status, uint64_t src_len){
     if(plog_disk_fd_ < 1){
-      return Status::IOError(plog_id,"plog_disk_fd_ < 1");
+      return Status::IOError(filename,"plog_disk_fd_ < 1");
     }
     struct plog_io_ctx write_ctx = {0};
     struct plog_rw_param rw_info = {static_cast<plog_rw_opt>(0)};
     init_plog_io_ctx(&write_ctx, plog_rw_done, plog_status);
     plog_status_init(plog_status);
-    uint64_t written_size = GetSize(plog_id);
+    uint64_t written_size = GetSize(filename,plog_id);
     if(written_size < 0){
-      return Status::IOError(plog_id, "written size = -1");
+      return Status::IOError(filename, "written size = -1");
     }
     rw_info.offset = written_size / PLOG_RW_MIN_GRLTY;
     rw_info.length = plog_calc_rw_len(src_len,PLOG_RW_MIN_GRLTY);
-    rw_info.plog_param.plog_id = std::strtoll(plog_id.data(), nullptr,0);
+    rw_info.plog_param.plog_id = plog_id;
     rw_info.plog_param.access_id = 0;
     rw_info.plog_param.pg_version = 0;
     rw_info.opt = PLOG_RW_OPT_APPEND;
@@ -261,19 +322,19 @@ class PlogFile{
     }
     if (!is_plog_status_success(plog_status)) {
       if(plog_status!= nullptr){
-        write_status_pool_->Deallocator(plog_id,plog_status);
+        write_status_pool_->Deallocator(filename,plog_status);
       }
-      return Status::IOError(plog_id, "plog write failed");
+      return Status::IOError(filename, "plog write failed");
     }
     //rte_free(data_rte);
     //free(sgl_vector);
     return Status::OK();
   }
 
-  static Status DoRead(std::string plog_id, uint64_t offset, size_t n, Slice* result, char* scratch,
+  static Status DoRead(std::string filename, uint64_t plog_id, uint64_t offset, size_t n, Slice* result, char* scratch,
                        sgl_vector_t *sgl_vector, bool iscopy) {
     if(plog_disk_fd_ < 1){
-      return Status::IOError(plog_id,"plog_disk_fd_ < 1");
+      return Status::IOError(filename,"plog_disk_fd_ < 1");
     }
     struct plog_rw_status plog_status;
     struct plog_io_ctx read_ctx = {0};
@@ -292,7 +353,7 @@ class PlogFile{
     plog_status_init(&plog_status);
     rw_info.offset = offset / PLOG_RW_MIN_GRLTY;
     rw_info.length = plog_calc_rw_len(n,PLOG_RW_MIN_GRLTY);
-    rw_info.plog_param.plog_id = std::strtoll(plog_id.data(), nullptr,0);
+    rw_info.plog_param.plog_id = plog_id;
     rw_info.plog_param.access_id = 0;
     rw_info.plog_param.pg_version = 0;
     rw_info.opt = PLOG_RW_OPT_READ;
@@ -300,7 +361,7 @@ class PlogFile{
     sgl_vector = static_cast<sgl_vector_t*>(calloc(
         1, sizeof(*sgl_vector) + (sgl_chain_cnt * sizeof(sgl_vector->sgls[0]))));
     if (sgl_vector == nullptr) {
-      return Status::IOError(plog_id, "calloc sgl_vector failed");
+      return Status::IOError(filename, "calloc sgl_vector failed");
     }
 
     for(int i=0; i<sgl_chain_cnt; i++){
@@ -309,7 +370,7 @@ class PlogFile{
         void *rdata = nullptr;
         rdata = rte_malloc(nullptr, PLOG_PAGE_SIZE + PLOG_DIF_AREA_SPACE, RTE_ALIGN);
         if(rdata == nullptr){
-          return Status::IOError(plog_id, "rte_malloc failed");
+          return Status::IOError(filename, "rte_malloc failed");
         }
         edata.push_back(rdata);
       }
@@ -335,7 +396,7 @@ class PlogFile{
       usleep(COMPLETION_USLEEP_TIME);
     }
     if (!is_plog_status_success(&plog_status)) {
-      return Status::IOError(plog_id, "plog read failed");
+      return Status::IOError(filename, "plog read failed");
     }
     if(iscopy){
       return Status::OK();
@@ -358,34 +419,34 @@ class PlogFile{
     return Status::OK();
   }
 
-  static Status DoRemove(std::string plog_id){
+  static Status DoRemove(std::string filename, uint64_t plog_id){
     struct plog_rw_status plog_status;
     struct plog_io_ctx ctx = {0};
     struct plog_param plog_param = {0};
     init_plog_io_ctx(&ctx, plog_rw_done, &plog_status);
     plog_status_init(&plog_status);
-    plog_param.plog_id = std::strtoll(plog_id.data(), nullptr,0);
+    plog_param.plog_id = plog_id;
     plog_delete(PlogFile::plog_disk_fd_,&plog_param,&ctx);
     while (!is_plog_cmd_done(&plog_status)) {
       plog_process_completions(PlogFile::plog_disk_fd_);
       usleep(COMPLETION_USLEEP_TIME);
     }
     if (!is_plog_status_success(&plog_status)) {
-      return Status::IOError(plog_id,"RemoveFile Failed");
+      return Status::IOError(filename,"RemoveFile Failed");
     }
     return Status::OK();
   }
 
-  static Status DoSeal(std::string plog_id){
+  static Status DoSeal(std::string filename, uint64_t plog_id){
     struct plog_rw_status plog_status;
     struct plog_io_ctx ctx = {0};
     struct plog_param plog_param = {0};
     init_plog_io_ctx(&ctx, plog_rw_done, &plog_status);
     plog_status_init(&plog_status);
-    plog_param.plog_id = std::strtoll(plog_id.data(), nullptr,0);
-    uint64_t seal_size = GetSize(plog_id);
+    plog_param.plog_id = plog_id;
+    uint64_t seal_size = GetSize(filename, plog_id);
     if(seal_size < 0){
-      return Status::IOError("Close " + plog_id, "seal_size = -1");
+      return Status::IOError("Close " + filename, "seal_size = -1");
     }
     plog_seal(plog_disk_fd_,&plog_param,seal_size,PLOG_SEAL_REASON,&ctx);
     while (!is_plog_cmd_done(&plog_status)) {
@@ -393,33 +454,33 @@ class PlogFile{
       usleep(COMPLETION_USLEEP_TIME);
     }
     if (!is_plog_status_success(&plog_status)) {
-      return Status::IOError("Close " + plog_id,"seal failed");
+      return Status::IOError("Close " + filename,"seal failed");
     }
     return Status::OK();
   }
 
-  static Status CopyPlog(const std::string src, const std::string dst){
+  static Status CopyPlog(const std::string src, uint64_t src_id, const std::string dst, uint64_t dst_id){
     //get size of src plog
-    uint64_t src_len = GetSize(src);
+    uint64_t src_len = GetSize(src,src_id);
     if(src_len == -1){
       return Status::IOError(src,"Size = -1");
     }
     sgl_vector_t *sgl_vector = nullptr;
-    DoRead(src,0,src_len, nullptr, nullptr, sgl_vector, true);
+    DoRead(src,src_id,0,src_len, nullptr, nullptr, sgl_vector, true);
     struct plog_rw_status plog_status;
-    Status s = DoCreate(dst);
+    Status s = DoCreate(dst,dst_id);
     if(!s.ok()){
       return Status::IOError(dst, "Create dst falied");
     }
-    s = DoAppend(dst,sgl_vector,&plog_status,src_len);
+    s = DoAppend(dst, dst_id,sgl_vector,&plog_status,src_len);
     if(!s.ok()){
       return Status::IOError(dst, "Append dst falied");
     }
-    s = DoSeal(dst);
+    s = DoSeal(dst,dst_id);
     if(!s.ok()){
       return Status::IOError(dst, "Seal dst falied");
     }
-    s = DoRemove(src);
+    s = DoRemove(src,src_id);
     if(!s.ok()){
       return Status::IOError(src, "Delete src falied");
     }
@@ -437,30 +498,30 @@ class PlogFile{
     assert(refs_>=0);
     if(refs_<=0 && do_delete_){
       MutexLock flock(&files_mutex_);
-      files_.erase(plog_id_);
-      DoRemove(plog_id_);
+      files_.erase(filename_);
+      DoRemove(filename_,plog_id_);
       delete this;
     }
   }
 
   uint64_t Size(){
-    return GetSize(plog_id_);
+    return GetSize(filename_,plog_id_);
   }
 
   Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) const{
     sgl_vector_t *sgl_vector = nullptr;
-    return DoRead(plog_id_,offset,n,result,scratch,sgl_vector, false);
+    return DoRead(filename_,plog_id_,offset,n,result,scratch,sgl_vector, false);
   }
 
   //must be called at first when NewWritableFile
   Status Create(){
     if(plog_disk_fd_ < 1){
-      return Status::IOError(plog_id_,"plog_disk_fd_ < 1");
+      return Status::IOError(filename_,"plog_disk_fd_ < 1");
     }
-    Status s = DoCreate(plog_id_);
+    Status s = DoCreate(filename_,plog_id_);
     if(!s.ok()){
       flag_ = false;
-      return Status::IOError(plog_id_,"plog_disk_fd_ < 1");
+      return Status::IOError(filename_,"plog_disk_fd_ < 1");
     }
     flag_ = true;
     return Status::OK();
@@ -468,15 +529,15 @@ class PlogFile{
 
   Status Append(const Slice& data){
     if(plog_disk_fd_ < 1){
-      return Status::IOError(plog_id_,"plog_disk_fd_ < 1");
+      return Status::IOError(filename_,"plog_disk_fd_ < 1");
     }
     if(!flag_ && !is_manifest_){
-      return Status::IOError(plog_id_,"flag_ is false");
+      return Status::IOError(filename_,"flag_ is false");
     }
     const char* src = data.data();
     size_t src_len = data.size();
     if(p_status_== nullptr){
-      p_status_ = write_status_pool_->Allocator(plog_id_);
+      p_status_ = write_status_pool_->Allocator(filename_);
     }
     struct plog_sgl_s sgl = {0};
     sgl_vector_t *sgl_vector = nullptr;
@@ -486,11 +547,11 @@ class PlogFile{
     sgl_vector = static_cast<sgl_vector_t*>(calloc(
         1, sizeof(*sgl_vector) + (sgl_cnt * sizeof(sgl_vector->sgls[0]))));
     if (sgl_vector == nullptr) {
-      return Status::IOError(plog_id_, "calloc sgl_vector failed");
+      return Status::IOError(filename_, "calloc sgl_vector failed");
     }
     data_rte = rte_malloc(nullptr, src_len + PLOG_DIF_AREA_SPACE, RTE_ALIGN);
-    if(data== nullptr){
-      return Status::IOError(plog_id_, "rte_malloc failed");
+    if(data_rte == nullptr){
+      return Status::IOError(filename_, "rte_malloc failed");
     }
     std::strcpy(static_cast<char*>(data_rte),src);
     sgl_vector->cnt = sgl_cnt;
@@ -500,7 +561,7 @@ class PlogFile{
     sgl.entrys[0].buf = (char*)data_rte;
     sgl.entrys[0].len = src_len + PLOG_DIF_AREA_SPACE;
     sgl_vector->sgls[0] = &sgl;
-    DoAppend(plog_id_,sgl_vector,p_status_,src_len);
+    DoAppend(filename_, plog_id_,sgl_vector,p_status_,src_len);
     rte_free(data_rte);
     free(sgl_vector);
     return Status::OK();
@@ -510,7 +571,7 @@ class PlogFile{
     MutexLock lock(&refs_mutex_);
     do_delete_ = true;
     if(refs_<=0){
-      return DoRemove(plog_id_);
+      return DoRemove(filename_,plog_id_);
     }
     return Status::OK();
   }
@@ -518,12 +579,12 @@ class PlogFile{
   Status Close(){
     Status s;
     if(plog_disk_fd_ < 1){
-      return Status::IOError("Close " + plog_id_,"plog_disk_fd_ < 1");
+      return Status::IOError("Close " + filename_,"plog_disk_fd_ < 1");
     }
-    DoSeal(plog_id_);
+    DoSeal(filename_,plog_id_);
     //deallocator p_status in the write_status_pool_
     if(p_status_!= nullptr){
-      s = write_status_pool_->Deallocator(plog_id_,p_status_);
+      s = write_status_pool_->Deallocator(filename_,p_status_);
     }
     Unref();
     return s;
@@ -538,8 +599,6 @@ int PlogFile::plog_disk_fd_ = 0;
 PlogRWStatusPool* PlogFile::write_status_pool_ = nullptr;
 port::Mutex PlogFile::files_mutex_;
 std::map<std::string,PlogFile*> PlogFile::files_ GUARDED_BY(PlogFile::files_mutex_);
-//port::Mutex PlogFile::writefile_mutex_;
-//std::map<std::string,PlogFile*> PlogFile::writefile_ GUARDED_BY(PlogFile::writefile_mutex_);
 
 class PlogSequentialFile final : public SequentialFile{
  public:
@@ -562,7 +621,7 @@ class PlogSequentialFile final : public SequentialFile{
 
   Status Skip(uint64_t n) override{
     if(pos_ > plog_file_->Size()){
-      return Status::IOError(plog_file_->plog_id_, "pos_ > plog_file->Size()");
+      return Status::IOError(plog_file_->filename_, "pos_ > plog_file->Size()");
     }
     const uint64_t available = plog_file_->Size() - pos_;
     if(n>available){
@@ -646,7 +705,7 @@ class PlogWritableFile final :  public WritableFile{
       if(PlogFile::write_status_pool_->isAllDone()){
         return FlushBuffer();
       }else{
-        return Status::IOError(plog_file_->plog_id_, "Sync MANIFEST: Other files haven't write to plog");
+        return Status::IOError(plog_file_->filename_, "Sync MANIFEST: Other files haven't write to plog");
       }
     }else{
       return FlushBuffer();
@@ -817,7 +876,9 @@ class PlogEnv : public Env{
     if(PlogFile::isCurrent(from)){
       //TODO():go to zookeeper
     }else{
-      return PlogFile::CopyPlog(from,to);
+      uint64_t from_id = PlogFile::NametoID(from);
+      uint64_t to_id = PlogFile::NametoID(to);
+      return PlogFile::CopyPlog(from,from_id,to,to_id);
     }
     return Status::OK();
   }

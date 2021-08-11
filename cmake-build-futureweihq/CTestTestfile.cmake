@@ -1,0 +1,38 @@
+# CMake generated Testfile for 
+# Source directory: /home/administrator/PlogLevelDB
+# Build directory: /home/administrator/PlogLevelDB/cmake-build-futureweihq
+# 
+# This file includes the relevant testing commands required for 
+# testing this directory and lists subdirectories to be tested as well.
+add_test(c_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/c_test")
+add_test(fault_injection_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/fault_injection_test")
+add_test(issue178_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/issue178_test")
+add_test(issue200_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/issue200_test")
+add_test(issue320_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/issue320_test")
+add_test(env_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/env_test")
+add_test(status_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/status_test")
+add_test(no_destructor_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/no_destructor_test")
+add_test(autocompact_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/autocompact_test")
+add_test(corruption_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/corruption_test")
+add_test(db_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/db_test")
+add_test(dbformat_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/dbformat_test")
+add_test(filename_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/filename_test")
+add_test(log_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/log_test")
+add_test(recovery_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/recovery_test")
+add_test(skiplist_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/skiplist_test")
+add_test(version_edit_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/version_edit_test")
+add_test(version_set_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/version_set_test")
+add_test(write_batch_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/write_batch_test")
+add_test(memenv_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/memenv_test")
+add_test(filter_block_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/filter_block_test")
+add_test(table_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/table_test")
+add_test(arena_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/arena_test")
+add_test(bloom_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/bloom_test")
+add_test(cache_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/cache_test")
+add_test(coding_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/coding_test")
+add_test(crc32c_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/crc32c_test")
+add_test(hash_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/hash_test")
+add_test(logging_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/logging_test")
+add_test(env_plog_test "/home/administrator/PlogLevelDB/cmake-build-futureweihq/env_plog_test")
+subdirs("third_party/googletest")
+subdirs("third_party/benchmark")
