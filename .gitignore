@@ -10,5 +10,4 @@ out/
 cmake-build-debug/
 third_party/
 googletest/
-cmake-build-debug-futurewei/
-cmake-build-debug-futureweihq/
+cmake-build-futureweihq/

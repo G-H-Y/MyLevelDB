@@ -235,6 +235,16 @@ typedef struct plog_rw_param {
     uint8_t dif_check;   /* 默认校验 */
 } plog_rw_param_t;
 
+typedef struct plog_drv_buf {
+    char *buf;
+    uint32_t len;
+} plog_drv_buf_t;
+
+typedef struct plog_drv_buf_list {
+    uint16_t cnt;
+    plog_drv_buf_t *buffers;
+} plog_drv_buf_list_t;
+
 /* *****************************************************************************************
 函数名：plog_create
 功能：在指定盘上创建plog
@@ -274,6 +284,34 @@ int plog_append_sgl(int fd, struct plog_rw_param *param, sgl_vector_t *sgl, stru
 返回值：0-成功，非0-失败
 ****************************************************************************************** */
 int plog_read_sgl(int fd, struct plog_rw_param *param, sgl_vector_t *sgl, struct plog_io_ctx *ctx);
+
+/* *****************************************************************************************
+函数名： plog_append_buff
+功能：在指定盘上执行写操作，数据格式为bufflist
+参数：
+  fd:指定盘的句柄
+  param： param参数,包括操作类型、offset、length等
+  data: 存放读写数据的bufflist，内存由client申请和释放
+  dif： dif与data分离时使用，否则为空 （当前不支持，必须为空指针）
+  ctx：命令上下文，包含IO完成回调函数callback
+返回方式：异步
+返回值：0-成功，非0-失败
+****************************************************************************************** */
+int plog_append_buff(int fd, struct plog_rw_param *param, plog_drv_buf_list_t *data, plog_drv_buf_list_t *dif, struct plog_io_ctx *ctx);
+
+/* *****************************************************************************************
+函数名： plog_read_buff
+功能：在指定盘上执行读操作，数据格式为bufflist
+参数：
+  fd:指定盘的句柄
+  param： param参数,包括操作类型、offset、length等
+  data: 存放读写数据的bufflist，内存由client申请和释放
+  dif： dif与data分离时使用，否则为空 （当前不支持，必须为空指针）
+  ctx：命令上下文，包含IO完成回调函数callback
+返回方式：异步
+返回值：0-成功，非0-失败
+****************************************************************************************** */
+int plog_read_buff(int fd, struct plog_rw_param *param, plog_drv_buf_list_t *data, plog_drv_buf_list_t *dif, struct plog_io_ctx *ctx);
 
 /* *****************************************************************************************
 函数名： plog_process_completions

@@ -16,7 +16,7 @@
 #include "plog/include/plog_fabric.h"
 
 namespace leveldb {
-constexpr const size_t kWritableFileBufferSize = 65536;
+constexpr const size_t kWritableFileBufferSize = 4096;
 const char *esn = "HS00027AYF10K9000095";
 const char *bdf = "0000:d9:00.0";
 #define PLOG_ID_LENGTH 8
@@ -26,7 +26,7 @@ const char *bdf = "0000:d9:00.0";
 #define PLOG_CREATE_SIZE 1024
 #define PLOG_RW_MIN_GRLTY 16 /* TODO : 盘接入时具体值从盘获取保存到NS表中，当前先固定值 */
 #define PLOG_PAGE_SIZE (kWritableFileBufferSize)
-#define PLOG_DIF_AREA_SPACE 0 //TODO(): 64 or 0?
+#define PLOG_DIF_AREA_SPACE 64
 #define PLOG_SEAL_REASON 3
 #define ENTRY_PER_SGL 64
 #define RTE_ALIGN 16

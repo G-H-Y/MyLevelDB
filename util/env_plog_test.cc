@@ -55,7 +55,7 @@ TEST_F(EnvPlogTest, TestOnWritableFile){
   //test write
   std::string filename;
   std::string wdata;
-  filename = "write1.txt";
+  filename = "write8.txt";
   wdata = "W0123456789";
   ASSERT_LEVELDB_OK(WriteStringToFile(env_, wdata.data(), filename));
   leveldb::WritableFile* file = nullptr;
