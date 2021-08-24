@@ -16,7 +16,7 @@
 #include "plog/include/plog_fabric.h"
 
 namespace leveldb {
-constexpr const size_t kWritableFileBufferSize = 4096;
+
 const char *esn = "HS00027AYF10K9000095";
 const char *bdf = "0000:d9:00.0";
 #define PLOG_ID_LENGTH 8
@@ -25,12 +25,10 @@ const char *bdf = "0000:d9:00.0";
 #define PLOG_CTX_TIMEOUT_MS (12 * 1000)
 #define PLOG_CREATE_SIZE 1024
 #define PLOG_RW_MIN_GRLTY 16 /* TODO : 盘接入时具体值从盘获取保存到NS表中，当前先固定值 */
-#define PLOG_PAGE_SIZE (kWritableFileBufferSize)
+#define PLOG_PAGE_SIZE 4096
 #define PLOG_DIF_AREA_SPACE 64
 #define PLOG_SEAL_REASON 3
 #define ENTRY_PER_SGL 64
-#define RTE_ALIGN 16
-//#define SGL_CNT 1
 
 enum plog_id_cvs {
   PLOG_LDB,
@@ -71,6 +69,7 @@ static inline int is_plog_cmd_done(struct plog_rw_status *status){
 static inline int is_plog_status_success(struct plog_rw_status *status){
   return status->status == PLOG_FABRIC_STATUS_SUCCESS;
 }
+
 
 void plog_rw_done(int status_code, int code_type, void *cb_arg){
   struct plog_rw_status *status = (struct plog_rw_status *)cb_arg;
@@ -129,9 +128,9 @@ class PlogRWStatusPool{
   Status Deallocator(std::string filename, struct plog_rw_status* p_status){
     MutexLock lock(&pool_mutex_);
     if(plog_rw_status_pool_.find(filename) == plog_rw_status_pool_.end()){
-      return Status::IOError(filename, "Plog Status not found");
+      printf("Deallocator Status not found!\n");
     }else if(plog_rw_status_pool_[filename]!= p_status){
-      return Status::IOError(filename, "Plog Status address changed");
+      printf("Deallocator Status address changed!\n");
     }else{
       while (!is_plog_cmd_done(p_status)) {
         usleep(COMPLETION_USLEEP_TIME);
@@ -140,7 +139,8 @@ class PlogRWStatusPool{
         return Status::IOError(filename, "plog write failed");
       }
       plog_rw_status_pool_.erase(filename);
-      delete p_status;
+      //delete p_status;
+      //p_status = NULL;
     }
     return Status::OK();
   }
@@ -178,6 +178,7 @@ class PlogFile{
   bool is_current_;
   bool is_manifest_;
   bool do_delete_;
+  bool is_sealed_;
   struct plog_rw_status *p_status_;
   static PlogRWStatusPool* write_status_pool_;
   static int plog_disk_fd_;
@@ -190,6 +191,7 @@ class PlogFile{
         p_status_(nullptr),
         flag_(true),
         do_delete_(false),
+        is_sealed_(false),
         is_manifest_(isManifest(filename)),
         is_current_(isCurrent(filename)),
         refs_(0){}
@@ -220,6 +222,7 @@ class PlogFile{
     return false;
   }
 
+  //TODO():std::hash
   static uint64_t NametoID(std::string filename){
     uint64_t plog_id;
     int found = filename.find('.');
@@ -260,7 +263,6 @@ class PlogFile{
     init_plog_io_ctx(&ctx, plog_rw_done, &plog_status);
     plog_status_init(&plog_status);
     plog_param.plog_id = plog_id;
-    memset(&attr, 0x0, sizeof(attr));
     plog_get_attr(plog_disk_fd_,&plog_param,&attr,&ctx);
     while (!is_plog_cmd_done(&plog_status)) {
       plog_process_completions(plog_disk_fd_);
@@ -296,101 +298,194 @@ class PlogFile{
     return Status::OK();
   }
 
-  static Status DoAppend(std::string filename, uint64_t plog_id, sgl_vector_t *sgl_vector,
-                         struct plog_rw_status* plog_status, uint64_t src_len){
+  static Status DoAppend(std::string filename, uint64_t plog_id, const Slice& sdata, struct plog_rw_status* plog_status){
     if(plog_disk_fd_ < 1){
       return Status::IOError(filename,"plog_disk_fd_ < 1");
     }
-    struct plog_io_ctx write_ctx = {0};
+    struct plog_io_ctx ctx = {0};
     struct plog_rw_param rw_info = {static_cast<plog_rw_opt>(0)};
-    init_plog_io_ctx(&write_ctx, plog_rw_done, plog_status);
+    plog_drv_buf_list_t plog_buf = {0};
+    void* data = NULL;
+    uint64_t offset;
+    uint64_t len;
+    uint64_t dif_len = PLOG_DIF_AREA_SPACE;
+    uint64_t aligned_offset;
+    uint64_t aligned_len;
+    bool is_unaligned;
+    int bufs;
+
+    init_plog_io_ctx(&ctx, plog_rw_done, plog_status);
     plog_status_init(plog_status);
+
     uint64_t written_size = GetSize(filename,plog_id);
     if(written_size < 0){
       return Status::IOError(filename, "written size = -1");
     }
-    rw_info.offset = written_size / PLOG_RW_MIN_GRLTY;
-    rw_info.length = plog_calc_rw_len(src_len,PLOG_RW_MIN_GRLTY);
+    offset = written_size;
+    len = sdata.size();
+    rw_info.offset = offset / PLOG_RW_MIN_GRLTY;
+    rw_info.length = plog_calc_rw_len(len, PLOG_RW_MIN_GRLTY);
     rw_info.plog_param.plog_id = plog_id;
     rw_info.plog_param.access_id = 0;
     rw_info.plog_param.pg_version = 0;
     rw_info.opt = PLOG_RW_OPT_APPEND;
-    plog_append_sgl(plog_disk_fd_, &rw_info, sgl_vector, &write_ctx);
+
+    aligned_offset = rw_info.offset*PLOG_RW_MIN_GRLTY;
+    aligned_len = (rw_info.length+1)*PLOG_RW_MIN_GRLTY;
+    is_unaligned = (aligned_offset % PLOG_PAGE_SIZE);
+    uint32_t curpage_rmn_len = PLOG_PAGE_SIZE - (aligned_offset % PLOG_PAGE_SIZE);
+    uint32_t page_rmn_len = is_unaligned ? (aligned_len>curpage_rmn_len ? curpage_rmn_len : aligned_len) : 0;
+    uint32_t data_rmn_len = aligned_len - page_rmn_len;
+    bufs = (is_unaligned) + (data_rmn_len/PLOG_PAGE_SIZE) + (data_rmn_len%PLOG_PAGE_SIZE?1:0);
+
+    data = rte_malloc(NULL, aligned_len + dif_len*bufs, PLOG_RW_MIN_GRLTY);
+    if (data == NULL) {
+      return Status::IOError(filename, "calloc bufflists failed");
+    }
+    plog_buf.buffers = (plog_drv_buf_t *)calloc(bufs, sizeof(plog_drv_buf_t));
+    if (plog_buf.buffers == NULL) {
+      return Status::IOError(filename, "calloc bufflists failed");
+    }
+
+    plog_buf.cnt = bufs;
+    uint64_t remain = aligned_len;
+    char* src = const_cast<char*>(sdata.data());
+    for(int i=0; i<bufs && remain>0; i++){
+      if(i==0 && is_unaligned){
+        std::memcpy(data,sdata.data(),page_rmn_len);
+        plog_buf.buffers[0].buf = (char*)data;
+        plog_buf.buffers[0].len = page_rmn_len + dif_len;
+        remain = aligned_len - page_rmn_len;
+      }else{
+        char* bstart = (char*)data + (page_rmn_len+dif_len)*is_unaligned + (PLOG_PAGE_SIZE+dif_len)*(i-is_unaligned);
+        plog_buf.buffers[i].buf = bstart;
+        if(remain >= PLOG_PAGE_SIZE){
+          std::memcpy(bstart,src+(aligned_len-remain),PLOG_PAGE_SIZE);
+          plog_buf.buffers[i].len = PLOG_PAGE_SIZE + dif_len;
+          remain -= PLOG_PAGE_SIZE;
+        }else{
+          std::memcpy(bstart,src+(aligned_len-remain),remain);
+          plog_buf.buffers[i].len = remain + dif_len;
+          remain  = 0;
+        }
+      }
+    }
+
+    plog_append_buff(plog_disk_fd_, &rw_info, &plog_buf, NULL, &ctx);
     while (!is_plog_cmd_done(plog_status)) {
       plog_process_completions(plog_disk_fd_);
       usleep(COMPLETION_USLEEP_TIME);
     }
+    write_status_pool_->Deallocator(filename,plog_status);
     if (!is_plog_status_success(plog_status)) {
-      if(plog_status!= nullptr){
-        write_status_pool_->Deallocator(filename,plog_status);
-      }
       return Status::IOError(filename, "plog write failed");
     }
-    //rte_free(data_rte);
-    //free(sgl_vector);
+
+    rte_free(data);
+    free(plog_buf.buffers);
     return Status::OK();
   }
 
-  static Status DoRead(std::string filename, uint64_t plog_id, uint64_t offset, size_t n, Slice* result, char* scratch,
-                       sgl_vector_t *sgl_vector, bool iscopy) {
+  static Status DoAppend1(std::string filename, uint64_t plog_id, uint64_t len,plog_drv_buf_list_t& plog_buf){
     if(plog_disk_fd_ < 1){
       return Status::IOError(filename,"plog_disk_fd_ < 1");
     }
     struct plog_rw_status plog_status;
-    struct plog_io_ctx read_ctx = {0};
+    struct plog_io_ctx ctx = {0};
     struct plog_rw_param rw_info = {static_cast<plog_rw_opt>(0)};
-    //struct plog_sgl_s sgl = {0};
-    //sgl_vector_t *sgl_vector = nullptr;
-    //void *data = nullptr;
-    //Each sgl_chain only has one sgl, each sgl has 64 entry(ENTRY_PER_SGL), each entry is PLOG_PAGE_SIZE
-    int total_entry_num = (n/PLOG_PAGE_SIZE) + (n % PLOG_PAGE_SIZE ? 1 : 0);
-    int lastsgl_entry_num = n % ENTRY_PER_SGL;
-    int sgl_chain_cnt = (total_entry_num/ENTRY_PER_SGL) + (lastsgl_entry_num ? 1 : 0);
-    assert(total_entry_num == (sgl_chain_cnt*ENTRY_PER_SGL+lastsgl_entry_num));
-    std::vector<std::vector<void*>> data;
 
-    init_plog_io_ctx(&read_ctx, plog_rw_done, &plog_status);
+    init_plog_io_ctx(&ctx, plog_rw_done, &plog_status);
     plog_status_init(&plog_status);
+
+    rw_info.offset = 0 / PLOG_RW_MIN_GRLTY;
+    rw_info.length = plog_calc_rw_len(len, PLOG_RW_MIN_GRLTY);
+    rw_info.plog_param.plog_id = plog_id;
+    rw_info.plog_param.access_id = 0;
+    rw_info.plog_param.pg_version = 0;
+    rw_info.opt = PLOG_RW_OPT_APPEND;
+    plog_append_buff(plog_disk_fd_, &rw_info, &plog_buf, NULL, &ctx);
+    while (!is_plog_cmd_done(&plog_status)) {
+      plog_process_completions(plog_disk_fd_);
+      usleep(COMPLETION_USLEEP_TIME);
+    }
+    if (!is_plog_status_success(&plog_status)) {
+      return Status::IOError(filename, "plog write failed");
+    }
+
+    return Status::OK();
+  }
+
+  static Status DoRead(std::string filename, uint64_t plog_id, uint64_t offset, size_t len, Slice* result, char* scratch){
+    if(plog_disk_fd_ < 1){
+      return Status::IOError(filename,"plog_disk_fd_ < 1");
+    }
+    struct plog_rw_status plog_status;
+    struct plog_io_ctx ctx = {0};
+    struct plog_rw_param rw_info = {static_cast<plog_rw_opt>(0)};
+    plog_drv_buf_list_t plog_buf;
+    void* data = NULL;
+    uint64_t dif_len = PLOG_DIF_AREA_SPACE;
+    uint64_t aligned_offset;
+    uint64_t aligned_len;
+    bool is_unaligned; //unaligned with 4096
+    int unaligned16; //unaligned with 16
+    int bufs;
+    uint64_t plog_size = GetSize(filename,plog_id);
+
+    init_plog_io_ctx(&ctx, plog_rw_done, &plog_status);
+    plog_status_init(&plog_status);
+
     rw_info.offset = offset / PLOG_RW_MIN_GRLTY;
-    rw_info.length = plog_calc_rw_len(n,PLOG_RW_MIN_GRLTY);
+    rw_info.length = plog_calc_rw_len(len, PLOG_RW_MIN_GRLTY);
+    unaligned16 = offset%16;
+    if(unaligned16 && (unaligned16+len)>16){ rw_info.length++; }
+    aligned_offset = rw_info.offset*PLOG_RW_MIN_GRLTY;
+    aligned_len = (rw_info.length+1)*PLOG_RW_MIN_GRLTY;
+    if((aligned_offset+aligned_len) > plog_size){
+      rw_info.length = plog_calc_rw_len(plog_size-aligned_offset,PLOG_RW_MIN_GRLTY);
+    }
     rw_info.plog_param.plog_id = plog_id;
     rw_info.plog_param.access_id = 0;
     rw_info.plog_param.pg_version = 0;
     rw_info.opt = PLOG_RW_OPT_READ;
 
-    sgl_vector = static_cast<sgl_vector_t*>(calloc(
-        1, sizeof(*sgl_vector) + (sgl_chain_cnt * sizeof(sgl_vector->sgls[0]))));
-    if (sgl_vector == nullptr) {
-      return Status::IOError(filename, "calloc sgl_vector failed");
+    aligned_len = (rw_info.length+1)*PLOG_RW_MIN_GRLTY;
+    is_unaligned = (aligned_offset % PLOG_PAGE_SIZE);
+    uint32_t curpage_rmn_len = PLOG_PAGE_SIZE - (aligned_offset % PLOG_PAGE_SIZE);
+    uint32_t page_rmn_len = is_unaligned ? (aligned_len>curpage_rmn_len ? curpage_rmn_len : aligned_len) : 0;
+    uint32_t data_rmn_len = aligned_len - page_rmn_len;
+    bufs = (is_unaligned) + (data_rmn_len/PLOG_PAGE_SIZE) + (data_rmn_len%PLOG_PAGE_SIZE?1:0);
+
+    plog_buf.buffers = (plog_drv_buf_t *)calloc(bufs, sizeof(plog_drv_buf_t));
+    if (plog_buf.buffers == NULL) {
+      return Status::IOError(filename, "calloc bufflists failed");
+    }
+    data = rte_malloc(NULL, aligned_len + dif_len*bufs, PLOG_RW_MIN_GRLTY);
+    if (data == NULL) {
+      return Status::IOError(filename, "calloc bufflists failed");
     }
 
-    for(int i=0; i<sgl_chain_cnt; i++){
-      std::vector<void*> edata;
-      for(int j=0; j<(i==sgl_chain_cnt-1)?lastsgl_entry_num:ENTRY_PER_SGL; j++){
-        void *rdata = nullptr;
-        rdata = rte_malloc(nullptr, PLOG_PAGE_SIZE + PLOG_DIF_AREA_SPACE, RTE_ALIGN);
-        if(rdata == nullptr){
-          return Status::IOError(filename, "rte_malloc failed");
+    plog_buf.cnt = bufs;
+    uint64_t remain = aligned_len;
+    for(int i=0; i<bufs && remain>0; i++){
+      if(i==0 && is_unaligned){
+        plog_buf.buffers[0].buf = (char*)data;
+        plog_buf.buffers[0].len = page_rmn_len + dif_len;
+        remain = aligned_len - page_rmn_len;
+      }else{
+        char* bstart = (char*)data + (page_rmn_len+dif_len)*is_unaligned + (PLOG_PAGE_SIZE+dif_len)*(i-is_unaligned);
+        plog_buf.buffers[i].buf = bstart;
+        if(remain >= PLOG_PAGE_SIZE){
+          plog_buf.buffers[i].len = PLOG_PAGE_SIZE + dif_len;
+          remain -= PLOG_PAGE_SIZE;
+        }else{
+          plog_buf.buffers[i].len = remain + dif_len;
+          remain  = 0;
         }
-        edata.push_back(rdata);
       }
-      data.push_back(edata);
     }
 
-    sgl_vector->cnt = sgl_chain_cnt;
-    for(int i=0; i<sgl_chain_cnt; i++){
-      struct plog_sgl_s sgl = {0};
-      sgl.nextSgl = nullptr;
-      sgl.entrySumInChain = 0x01;
-      sgl.entrySumInSgl = 0x01;
-      for(int j=0; j<(i==sgl_chain_cnt-1)?lastsgl_entry_num:ENTRY_PER_SGL; j++){
-        sgl.entrys[j].buf = (char*)data[i][j];
-        sgl.entrys[j].len = PLOG_PAGE_SIZE + PLOG_DIF_AREA_SPACE;
-      }
-      sgl_vector->sgls[i] = &sgl;
-    }
-
-    plog_read_sgl(plog_disk_fd_, &rw_info, sgl_vector, &read_ctx);
+    plog_read_buff(plog_disk_fd_, &rw_info, &plog_buf, NULL, &ctx);
     while (!is_plog_cmd_done(&plog_status)) {
       plog_process_completions(plog_disk_fd_);
       usleep(COMPLETION_USLEEP_TIME);
@@ -398,24 +493,90 @@ class PlogFile{
     if (!is_plog_status_success(&plog_status)) {
       return Status::IOError(filename, "plog read failed");
     }
-    if(iscopy){
-      return Status::OK();
+
+    scratch = (char*)rte_malloc(NULL, aligned_len, PLOG_RW_MIN_GRLTY);
+    if (scratch == NULL) {
+      return Status::IOError(filename, "malloc scratch failed");
     }
-    std::string sdata = "";
-    for(int i=0; i<sgl_vector->cnt; i++){
-      struct plog_sgl_s* sgl = sgl_vector->sgls[i];
-      for(int j=0; j<sgl->entrySumInSgl;j++){
-        sdata += sgl->entrys[j].buf;
+
+    remain = aligned_len;
+    for(int i=0; i<bufs && remain>0; i++){
+      if(i==0 && is_unaligned){
+        std::memcpy(scratch, plog_buf.buffers[0].buf, page_rmn_len);
+        remain = aligned_len - page_rmn_len;
+      }else{
+        uint64_t soffset = (page_rmn_len)*is_unaligned + (PLOG_PAGE_SIZE)*(i-is_unaligned);
+        if(remain >= PLOG_PAGE_SIZE){
+          std::memcpy(scratch+soffset, plog_buf.buffers[i].buf, PLOG_PAGE_SIZE);
+          remain -= PLOG_PAGE_SIZE;
+        }else{
+          std::memcpy(scratch+soffset,  plog_buf.buffers[i].buf, remain);
+          remain  = 0;
+        }
       }
     }
-    std::strcpy(scratch, sdata.data());
-    *result = Slice(scratch,n);
-    for(int i=0; i<sgl_chain_cnt; i++){
-      for(int j=0; j<(i==sgl_chain_cnt-1)?lastsgl_entry_num:ENTRY_PER_SGL; j++){
-        rte_free(data[i][j]);
+    *result = Slice(scratch+unaligned16,len);
+
+    rte_free(data);
+    free(plog_buf.buffers);
+    return Status::OK();
+  }
+
+  static Status DoRead1(std::string filename, uint64_t plog_id, uint64_t len, plog_drv_buf_list_t &plog_buf){
+    if(plog_disk_fd_ < 1){
+      return Status::IOError(filename,"plog_disk_fd_ < 1");
+    }
+    struct plog_rw_status plog_status;
+    struct plog_io_ctx ctx = {0};
+    struct plog_rw_param rw_info = {static_cast<plog_rw_opt>(0)};
+    void* data = NULL;
+    uint64_t dif_len = PLOG_DIF_AREA_SPACE;
+    int bufs;
+
+    init_plog_io_ctx(&ctx, plog_rw_done, &plog_status);
+    plog_status_init(&plog_status);
+
+    rw_info.offset = 0;
+    rw_info.length = plog_calc_rw_len(len, PLOG_RW_MIN_GRLTY);
+    rw_info.plog_param.plog_id = plog_id;
+    rw_info.plog_param.access_id = 0;
+    rw_info.plog_param.pg_version = 0;
+    rw_info.opt = PLOG_RW_OPT_READ;
+
+    bufs = (len/PLOG_PAGE_SIZE) + (len%PLOG_PAGE_SIZE?1:0);
+
+    plog_buf.buffers = (plog_drv_buf_t *)calloc(bufs, sizeof(plog_drv_buf_t));
+    if (plog_buf.buffers == NULL) {
+      return Status::IOError(filename, "calloc bufflists failed");
+    }
+    data = rte_malloc(NULL, len + dif_len*bufs, PLOG_RW_MIN_GRLTY);
+    if (data == NULL) {
+      return Status::IOError(filename, "calloc bufflists failed");
+    }
+
+    plog_buf.cnt = bufs;
+    uint64_t remain = len;
+    for(int i=0; i<bufs && remain>0; i++){
+      char* bstart = (char*)data + (PLOG_PAGE_SIZE+dif_len)*i;
+      plog_buf.buffers[i].buf = bstart;
+      if(remain >= PLOG_PAGE_SIZE){
+        plog_buf.buffers[i].len = PLOG_PAGE_SIZE + dif_len;
+        remain -= PLOG_PAGE_SIZE;
+      }else{
+        plog_buf.buffers[i].len = remain + dif_len;
+        remain  = 0;
       }
     }
-    free(sgl_vector);
+
+    plog_read_buff(plog_disk_fd_, &rw_info, &plog_buf, NULL, &ctx);
+    while (!is_plog_cmd_done(&plog_status)) {
+      plog_process_completions(plog_disk_fd_);
+      usleep(COMPLETION_USLEEP_TIME);
+    }
+    if (!is_plog_status_success(&plog_status)) {
+      return Status::IOError(filename, "plog read failed");
+    }
+
     return Status::OK();
   }
 
@@ -459,26 +620,36 @@ class PlogFile{
     return Status::OK();
   }
 
-  static Status CopyPlog(const std::string src, uint64_t src_id, const std::string dst, uint64_t dst_id){
+  static Status CopyPlog(const std::string src, uint64_t src_id, const std::string dst, uint64_t dst_id, bool is_src_sealed){
     //get size of src plog
     uint64_t src_len = GetSize(src,src_id);
     if(src_len == -1){
       return Status::IOError(src,"Size = -1");
     }
-    sgl_vector_t *sgl_vector = nullptr;
-    DoRead(src,src_id,0,src_len, nullptr, nullptr, sgl_vector, true);
-    struct plog_rw_status plog_status;
-    Status s = DoCreate(dst,dst_id);
+    plog_drv_buf_list_t plog_buf;
+    Status s;
+    s = DoRead1(src, src_id, src_len, plog_buf);
     if(!s.ok()){
-      return Status::IOError(dst, "Create dst falied");
+      return Status::IOError(src,"read failed");
     }
-    s = DoAppend(dst, dst_id,sgl_vector,&plog_status,src_len);
+    s = DoCreate(dst,dst_id);
     if(!s.ok()){
-      return Status::IOError(dst, "Append dst falied");
+      return Status::IOError(src,"create dst failed while doing copy");
     }
+
+    s = DoAppend1(dst, dst_id, src_len, plog_buf);
+    if(!s.ok()){
+      DoSeal(dst,dst_id);
+      DoRemove(dst, dst_id);
+      return Status::IOError(dst, "Append dst failed");
+    }
+
     s = DoSeal(dst,dst_id);
     if(!s.ok()){
       return Status::IOError(dst, "Seal dst falied");
+    }
+    if(!is_src_sealed){
+      s = DoSeal(src, src_id);
     }
     s = DoRemove(src,src_id);
     if(!s.ok()){
@@ -509,8 +680,7 @@ class PlogFile{
   }
 
   Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) const{
-    sgl_vector_t *sgl_vector = nullptr;
-    return DoRead(filename_,plog_id_,offset,n,result,scratch,sgl_vector, false);
+    return DoRead(filename_, plog_id_, offset, n, result, scratch);
   }
 
   //must be called at first when NewWritableFile
@@ -534,44 +704,25 @@ class PlogFile{
     if(!flag_ && !is_manifest_){
       return Status::IOError(filename_,"flag_ is false");
     }
-    const char* src = data.data();
-    size_t src_len = data.size();
     if(p_status_== nullptr){
       p_status_ = write_status_pool_->Allocator(filename_);
     }
-    struct plog_sgl_s sgl = {0};
-    sgl_vector_t *sgl_vector = nullptr;
-    void *data_rte = nullptr;
-    int sgl_cnt = 1;
-    assert((src_len+PLOG_DIF_AREA_SPACE)<=PLOG_PAGE_SIZE);
-    sgl_vector = static_cast<sgl_vector_t*>(calloc(
-        1, sizeof(*sgl_vector) + (sgl_cnt * sizeof(sgl_vector->sgls[0]))));
-    if (sgl_vector == nullptr) {
-      return Status::IOError(filename_, "calloc sgl_vector failed");
-    }
-    data_rte = rte_malloc(nullptr, src_len + PLOG_DIF_AREA_SPACE, RTE_ALIGN);
-    if(data_rte == nullptr){
-      return Status::IOError(filename_, "rte_malloc failed");
-    }
-    std::strcpy(static_cast<char*>(data_rte),src);
-    sgl_vector->cnt = sgl_cnt;
-    sgl.nextSgl = nullptr;
-    sgl.entrySumInChain = 0x01;
-    sgl.entrySumInSgl = 0x01;
-    sgl.entrys[0].buf = (char*)data_rte;
-    sgl.entrys[0].len = src_len + PLOG_DIF_AREA_SPACE;
-    sgl_vector->sgls[0] = &sgl;
-    DoAppend(filename_, plog_id_,sgl_vector,p_status_,src_len);
-    rte_free(data_rte);
-    free(sgl_vector);
-    return Status::OK();
+    return DoAppend(filename_, plog_id_, data, p_status_);
   }
 
   Status Remove(){
     MutexLock lock(&refs_mutex_);
     do_delete_ = true;
     if(refs_<=0){
-      return DoRemove(filename_,plog_id_);
+      Status s = DoSeal(filename_, plog_id_);
+      is_sealed_ = true;
+      if(!s.ok()){
+        return Status::IOError(filename_,"Seal failed");
+      }
+      s = DoRemove(filename_,plog_id_);
+      if(!s.ok()){
+        return Status::IOError(filename_,"Remove failed");
+      }
     }
     return Status::OK();
   }
@@ -581,11 +732,8 @@ class PlogFile{
     if(plog_disk_fd_ < 1){
       return Status::IOError("Close " + filename_,"plog_disk_fd_ < 1");
     }
-    DoSeal(filename_,plog_id_);
-    //deallocator p_status in the write_status_pool_
-    if(p_status_!= nullptr){
-      s = write_status_pool_->Deallocator(filename_,p_status_);
-    }
+    delete p_status_;
+    p_status_ = NULL;
     Unref();
     return s;
   }
@@ -604,7 +752,6 @@ class PlogSequentialFile final : public SequentialFile{
  public:
   PlogSequentialFile(PlogFile* plog_file)
       : plog_file_(plog_file), pos_(0) { plog_file_->Ref();}
-  ~PlogSequentialFile() override { plog_file_->Unref();}
 
   Status Read(size_t n, Slice* result, char* scratch) override{
     if(plog_file_->is_current_){
@@ -631,6 +778,7 @@ class PlogSequentialFile final : public SequentialFile{
     return Status::OK();
   }
  private:
+  ~PlogSequentialFile() override { plog_file_->Unref();}
   PlogFile *plog_file_;
   uint64_t pos_;
 };
@@ -638,12 +786,13 @@ class PlogSequentialFile final : public SequentialFile{
 class PlogRandomAccessFile final : public RandomAccessFile{
  public:
   PlogRandomAccessFile(PlogFile* plog_file): plog_file_(plog_file) { plog_file_->Ref();}
-  ~PlogRandomAccessFile() override { plog_file_->Unref();}
+
   Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) const override{
     return plog_file_->Read(offset,n,result,scratch);
   }
 
  private:
+  ~PlogRandomAccessFile() override { plog_file_->Unref();}
   PlogFile *plog_file_;
 };
 
@@ -651,18 +800,13 @@ class PlogWritableFile final :  public WritableFile{
  public:
   PlogWritableFile(PlogFile *plog_file)
       : plog_file_(plog_file), pos_(0) { plog_file_->Ref();}
-  ~PlogWritableFile() override{
-    if(plog_file_!= nullptr){
-      Close();
-    }
-  }
 
   Status Append(const Slice& data) override{
     size_t write_size = data.size();
     const char* write_data = data.data();
 
     // Fit as much as possible into buffer.
-    size_t copy_size = std::min(write_size, kWritableFileBufferSize - pos_);
+    size_t copy_size = std::min(write_size, PLOG_PAGE_SIZE - pos_);
     std::memcpy(buf_ + pos_, write_data, copy_size);
     write_data += copy_size;
     write_size -= copy_size;
@@ -678,7 +822,7 @@ class PlogWritableFile final :  public WritableFile{
     }
 
     // Small writes go to buffer, large writes are written directly.
-    if (write_size < kWritableFileBufferSize) {
+    if (write_size < PLOG_PAGE_SIZE) {
       std::memcpy(buf_, write_data, write_size);
       pos_ = write_size;
       return Status::OK();
@@ -692,7 +836,7 @@ class PlogWritableFile final :  public WritableFile{
     if(s.ok()){
       s = plog_file_->Close();
     }
-    //plog_file_ = NULL;
+    plog_file_ = NULL;
     return s;
   }
 
@@ -714,6 +858,12 @@ class PlogWritableFile final :  public WritableFile{
 
  private:
 
+  ~PlogWritableFile() override{
+    if(plog_file_!= nullptr){
+      Close();
+    }
+  }
+
   Status FlushBuffer() {
     Status status = WriteUnbuffered(buf_, pos_);
     pos_ = 0;
@@ -725,7 +875,7 @@ class PlogWritableFile final :  public WritableFile{
     return s;
   }
 
-  char buf_[kWritableFileBufferSize];
+  char buf_[PLOG_PAGE_SIZE];
   size_t pos_;
   PlogFile* plog_file_;
 };
@@ -876,9 +1026,26 @@ class PlogEnv : public Env{
     if(PlogFile::isCurrent(from)){
       //TODO():go to zookeeper
     }else{
+      MutexLock lock(&PlogFile::files_mutex_);
+      PlogFile* plog_file;
+      if(PlogFile::files_.find(from)!=PlogFile::files_.end()){
+        plog_file = PlogFile::files_[from];
+      }else{
+        return Status::IOError(from, "not exist in PlogFile::files_ at all");
+      }
+      if(plog_file->Size() == -1){
+        return Status::IOError(from, "plog size = -1");
+      }
       uint64_t from_id = PlogFile::NametoID(from);
       uint64_t to_id = PlogFile::NametoID(to);
-      return PlogFile::CopyPlog(from,from_id,to,to_id);
+      bool is_src_sealed = plog_file->is_sealed_;
+      Status s = PlogFile::CopyPlog(from,from_id,to,to_id,is_src_sealed);
+      if(!s.ok()){
+        return Status::IOError(from, "rename file failed");
+      }
+      plog_file = new PlogFile(to);
+      PlogFile::files_[to] = plog_file;
+      PlogFile::files_.erase(from);
     }
     return Status::OK();
   }
